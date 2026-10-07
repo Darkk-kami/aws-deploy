@@ -1,6 +1,7 @@
 # Infrastructure
 
 ## Architecture
+<img width="5850" height="3810" alt="infra" src="https://github.com/user-attachments/assets/4bd3d7a2-7103-4b6f-9cfe-4256bba0d7b0" />
 
 The application runs in AWS `eu-west-2` (London), selected for the target
 users' latency among the standard AWS regions considered. The service is a
