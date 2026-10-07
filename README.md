@@ -72,174 +72,460 @@ permissions. The role trust policy is configured outside this repository and
 should restrict assumption to this repository and the intended branch or
 GitHub Environment. Do not store long-lived AWS access keys in GitHub.
 
-## Troubleshooting exercise: release completed, ALB targets unhealthy
 
-Consider a release scenario in which GitHub reports success, ECS tasks appear
-to be running, but customers receive HTTP 503 responses and the ALB target
-group marks the targets unhealthy. A running ECS task only confirms that the
-task's processes have started; it does not prove that the application is ready
-or passing the ALB health check. If the ALB has no healthy targets, it cannot
-forward requests and may return 503.
 
-One important qualification for this repository: its CD workflow currently
-builds, smoke-tests, and pushes an image to ECR; it does not update ECS. A
-green CD run therefore confirms image publication, not a production
-deployment. The investigation below applies if ECS was updated by a separate
-mechanism or after an ECS deployment workflow is added.
 
-### Investigation order
+## Troubleshooting Exercise
 
-1. **Establish the timeline and exact version.** Check the GitHub Actions run,
-   commit SHA, semantic release version, ECR image tags, and ECS task
-   definition revision. The image's `/version` endpoint and
-   `org.internal.image.revision` label can confirm the source SHA. Compare
-   when tasks changed, target health started failing, and customer 503s began.
-2. **Start with ALB target health.** In EC2 Target Groups, inspect registered
-   targets, each target's health state and reason, and the configured
-   protocol, port, path, matcher, interval, and timeout. The current Terraform
-   expects HTTP on port `8000`, path `/health`, with `200-399` accepted every
-   30 seconds. Check whether all targets fail or only some.
-3. **Inspect the ECS service and task.** Check the deployment events, task
-   definition revision, desired and running counts, container exit details,
-   and CPU/memory graphs. `RUNNING` is not equivalent to passing an ALB health
-   check.
-4. **Inspect logs and metrics around the failure.** Review the ECS container
-   log group `/aws/ecs/<tier>-<product>-ecs-service`. Check the CloudWatch
-   dashboard's CPU utilization, memory utilization, and running task count.
-   For ALB context, inspect CloudWatch `HealthyHostCount`,
-   `UnHealthyHostCount`, `HTTPCode_ELB_5XX_Count`,
-   `HTTPCode_Target_5XX_Count`, and `TargetResponseTime` for the relevant load
-   balancer and target group. The latter ALB metrics are useful investigation
-   signals but are not currently included in the Terraform dashboard.
+For the troubleshooting scenario, I would approach it by following the request path from the customer back through the infrastructure.
 
-### Likely causes and how to test them
+The scenario is that a new release has been deployed, GitHub Actions says the deployment was successful, ECS shows that the tasks are running, but customers are receiving HTTP 503 responses and the load balancer is reporting unhealthy targets.
 
-1. **Health-check or target configuration mismatch.** The new task might
-   listen on a different port or interface, the target group might use the
-   wrong port/path, or the task security group might no longer allow traffic
-   from the ALB security group. Compare the ALB listener, target group, ECS
-   container mapping, and service security groups. Use the target group's
-   unhealthy reason: a response-code mismatch suggests the path/application
-   response; a timeout suggests reachability or a stalled process. Confirm the
-   application listens on `0.0.0.0:8000` and `/health` returns 200. The current
-   app does both, and the task security group permits port 8000 from the ALB
-   security group. If those settings match the deployed revision and the
-   registered target responds successfully, this cause is less likely.
-2. **Application regression or resource pressure.** A release can start a
-   process that remains alive while initialization is stuck, the handler
-   errors, or responses time out. Look for startup exceptions and health
-   request failures in ECS logs, and correlate them with CPU, memory, target
-   response time, and task-count changes. The current alarms cover CPU and
-   memory above 70% for two consecutive one-minute periods; they have no
-   notification actions configured. Normal resource graphs and successful
-   health responses from the deployed image make resource pressure or an
-   application regression less likely.
-3. **Dependency or configuration failure.** An application can be running but
-   unable to serve requests because a required dependency, configuration value,
-   or credential is missing or unreachable. Search the task logs for
-   connection timeouts, authentication failures, DNS errors, or missing
-   configuration, then check the specific dependency's health and network
-   path. This repository's current app does not define a database dependency,
-   so treat a database issue as a generic possibility only if one is added;
-   do not assume one exists in this architecture. If there are no dependency
-   errors and the service does not rely on an unavailable external dependency,
-   eliminate this cause.
+The first thing I would clarify is that there is actually no contradiction between the ECS task being `RUNNING` and the ALB saying the target is `UNHEALTHY`.
 
-### Recovery and prevention
+ECS saying that the task is running basically tells me that the container has started and the task itself is alive. It does not necessarily mean that the application inside the container is healthy or that it is capable of responding to requests.
 
-If failures began with a release and the previous image is known to be healthy,
-the safest recovery is to restore the previous known-good, explicitly tagged
-image through the authorized ECS deployment path, then verify target health
-and `/health`. Avoid changing production resources ad hoc in the console
-unless emergency procedures require it; reconcile any emergency change back
-into the source of truth. This repository does not yet provide an ECS
-deployment or rollback command, so that recovery path must be established
-before claiming rollback is automated. ECS deployment circuit-breaker
-rollback is also not configured in Terraform.
+The ALB performs its own health check against the target. So I can have a container that is technically running, but the application inside it could be listening on the wrong port, returning an error from the health endpoint, taking too long to respond, or being unable to reach one of its dependencies.
 
-To prevent recurrence, add a controlled deployment path that promotes the
-same immutable image through development and staging before production, runs
-health checks after each deployment, and gates production with an authorized
-GitHub Environment. Configure ECS deployment circuit-breaker rollback,
-require CI checks and reviews before merge, and notify responders from
-CloudWatch alarms. A successful workflow should mean that the deployed
-application passed runtime health checks—not merely that an image was pushed
-to ECR.
+So the first thing I would investigate is the **ALB target health**, because the ALB is already telling me that the targets are unhealthy.
 
-## Repository and production security
+### What I would investigate first
 
-The security boundary is layered: GitHub controls who may change and approve
-workflow source, while AWS IAM controls which GitHub workload may assume each
-role and what that role can do. OIDC provides short-lived credentials, but it
-does not by itself make an overly broad trust policy or IAM policy safe.
+I would first confirm the deployment itself.
 
-### What currently prevents a developer or compromised workflow from deploying arbitrary changes to production?
+I would go to GitHub Actions and confirm:
 
-There is no production deployment path in this repository today: the
-application workflow pushes images to ECR but does not deploy them to ECS, and
-there is no Terraform apply workflow. The current controls therefore do not
-amount to a production approval gate.
+* which commit was deployed
+* which image/version was deployed
+* when the deployment happened
+* which environment was affected
+* whether the deployment completed successfully
 
-The active `main` ruleset requires a pull request and blocks branch deletion
-and force-pushes, but it requires zero approvals and no CI status checks. The
-repository is public, and no CODEOWNERS file or protected GitHub deployment
-environment is configured. Consequently, do not rely on human approval,
-CODEOWNERS, or environment approvals as controls that are already enforced.
+That gives me a timeline so I can correlate the deployment with when the 503 errors started.
 
-For a future production path, protect the source branch with required reviews
-and CI checks, require CODEOWNERS review for `.github/` and `infra/`, and gate
-production with a GitHub Environment that has designated reviewers. Restrict
-the AWS OIDC trust policy to this repository and the protected branch or
-environment, and limit each role's permissions to its task. These GitHub and
-AWS controls complement each other: GitHub limits who can change or approve a
-workflow; AWS limits which workflow identity can obtain credentials and what
-those credentials can do.
+After that, I would go directly to the Application Load Balancer and inspect the target group.
 
-Current repository settings and files:
+I would look at:
 
-- The repository is currently **public**.
-- An active ruleset on `main` requires pull requests and blocks branch
-  deletion and non-fast-forward updates. It allows squash and rebase merges.
-- The ruleset currently requires **zero approving reviews** and does not
-  require status checks. Although CI workflows run, passing them is not
-  currently enforced by this ruleset before merge.
-- No `CODEOWNERS` file or GitHub deployment environments are configured in
-  this repository. There is no configured staging/production promotion gate.
-- GitHub Actions currently allows all actions and does not enforce full-SHA
-  pinning in repository settings, although the workflows pin many actions to
-  commit SHAs.
+* whether the targets are registered
+* whether they are healthy or unhealthy
+* the reason the target is marked unhealthy
+* the health-check path
+* the health-check port
+* the health-check protocol
+* the expected response code
+* whether all targets are unhealthy or only some of them
 
-Therefore, do not treat required human review, CODEOWNERS review, protected
-production environments, or a private repository as controls already in
-force. They are recommended hardening steps: restrict repository access and
-visibility as appropriate, require approvals and CI status checks for `main`,
-add CODEOWNERS for workflows and Terraform, restrict allowed/pinned actions,
-and protect production with an environment approval. The actual required
-review count and approvers should be taken from GitHub settings after those
-controls are configured.
+This is important because the target group's unhealthy reason can immediately narrow down the problem.
 
-To reduce the blast radius of a compromised workflow, scope each OIDC trust
-policy to this repository and the intended ref or protected GitHub Environment,
-and grant only the AWS actions and resources needed by that workflow. The
-Terraform role is the most sensitive role if it is ever granted apply
-permissions, because it could change or destroy managed infrastructure. The
-current infrastructure workflow only plans. A compromised application
-workflow should not inherit Terraform permissions; the current app role is
-used by the CD workflow for ECR publishing, not ECS deployment.
+For example, if the health check is returning the wrong HTTP status, I would investigate the application or health-check path.
 
-The Terraform configuration does not integrate application secrets with
-Secrets Manager or SSM. The configured environment-variable map is plaintext
-configuration and must not contain secrets. Add a managed secret integration
-before supplying application secrets; never put secrets in source, Dockerfiles,
-or checked-in tfvars.
+If the health check is timing out, I would investigate connectivity, security groups, the application process, or resource pressure.
 
-The intended future promotion path is `main` → development → staging →
-production, with health verification and authorized approval at each relevant
-environment boundary. Currently, a release from `main` is built and published
-to ECR only; there is no implemented ECS deployment or staging/production
-promotion. Source-code contribution, infrastructure modification, image
-publishing, and production promotion should remain separate authorization
-boundaries as the pipeline grows.
+I would then move into ECS and CloudWatch.
 
-For the Terraform architecture, state, and operational details, see
-[infra/README.md](infra/README.md).
+In ECS I would check:
+
+* task status
+* task definition revision
+* deployment events
+* desired versus running task count
+* whether tasks are restarting
+* CPU utilization
+* memory utilization
+
+Then I would check the application's CloudWatch logs around the exact time the deployment happened.
+
+I would look for application startup errors, exceptions, failed health checks, connection failures, configuration problems, and anything that indicates that the application is technically running but unable to serve requests.
+
+I would also check the ALB metrics, particularly healthy and unhealthy host count, HTTP 5xx responses, and target response time.
+
+The general idea is that I want to correlate:
+
+```text
+Deployment
+    ↓
+ECS task starts
+    ↓
+ALB health check
+    ↓
+Target becomes unhealthy
+    ↓
+ALB returns 503
+```
+
+That gives me a much better picture than simply looking at whether the ECS task is running.
+
+### Possible cause 1 — Health-check or target configuration mismatch
+
+The first possible cause is a configuration mismatch between the ALB, target group, ECS task, and application.
+
+For example, the new task could be listening on a different port or interface, the target group could be checking the wrong port or path, or the ECS security group could no longer allow traffic from the ALB security group.
+
+I would compare the complete chain:
+
+```text
+ALB listener
+    ↓
+Target group
+    ↓
+Target port
+    ↓
+ECS container port
+    ↓
+Application listening port
+```
+
+For this application, I would confirm that the application is listening on `0.0.0.0:8000` and that the `/health` endpoint returns HTTP 200.
+
+I would also confirm that the ECS task security group allows TCP 8000 from the ALB security group.
+
+The target group's unhealthy reason is particularly useful here.
+
+If the ALB is receiving a response but the response code does not match what the health check expects, I would investigate the application or health-check path.
+
+If the ALB is timing out completely, I would investigate connectivity, the security group, the application process, or resource pressure.
+
+If all of those settings match the deployed revision and the registered target responds successfully to the health check, then I can eliminate this as the primary cause.
+
+### Possible cause 2 — Application regression or resource pressure
+
+The second possibility is that the application itself is unhealthy even though the container is running.
+
+A new release could start successfully but then get stuck during initialization, encounter an application error, or become too resource-intensive to respond properly.
+
+I would check the application logs first for startup exceptions, failed health-check requests, and application errors.
+
+Then I would correlate those logs with:
+
+* CPU utilization
+* memory utilization
+* target response time
+* running task count
+* ALB 5xx responses
+
+If CPU or memory suddenly increased around the time the new release was deployed, that could indicate resource pressure.
+
+If the resources are normal but the application logs show exceptions or failed requests, then I would treat it more like an application regression.
+
+The important thing is that I would not automatically assume that the issue is autoscaling.
+
+I would use the metrics to prove whether the workload is actually resource-constrained.
+
+### Possible cause 3 — Dependency or configuration failure
+
+Another possibility is that the application is running but cannot actually serve requests because something it depends on is unavailable or incorrectly configured.
+
+That could be a database, another service, a required configuration value, a secret, or some other dependency.
+
+I would search the application logs for things like:
+
+* connection timeouts
+* authentication failures
+* DNS failures
+* missing configuration
+* dependency errors
+* connection-pool exhaustion
+
+Then I would investigate the specific dependency and verify that the application can actually reach it.
+
+For example, if the application requires a database connection before it can successfully respond to `/health`, the ECS task could remain `RUNNING` while the ALB continues to mark it unhealthy because the application cannot complete the health check.
+
+If the logs show no dependency errors and the application does not rely on an unavailable external dependency, then I can eliminate this cause.
+
+### Safest immediate recovery action
+
+If I establish that the issue started immediately after the new release and the previous version was known to be healthy, I would not start making random changes to production.
+
+The safest immediate recovery would be to restore the **previous known-good version**.
+
+Because the application image is versioned and pinned, I can identify the previous working image and redeploy that explicitly.
+
+The goal is to restore customer availability first and investigate the faulty release separately.
+
+I would then verify:
+
+* ECS tasks are running
+* ALB targets are healthy
+* `/health` returns successfully
+* 503 responses have stopped
+* application logs are normal
+
+I would avoid making ad-hoc production changes through the AWS console unless there is an actual emergency requiring it. If an emergency change is made, it should subsequently be reconciled back into the infrastructure source of truth.
+
+For automated recovery, I would configure the ECS deployment circuit breaker with rollback. That way, if a new ECS deployment fails to become healthy, ECS can automatically roll back to the previous deployment.
+
+The important distinction is that **ECS does not automatically roll back simply because an ALB target is unhealthy unless the appropriate deployment rollback behavior has been configured.**
+
+Preventing the same problem from reaching customers
+
+The immediate recovery gets the service back online, but that is not the end of the incident.
+
+Once the customer impact has been resolved, I would conduct a Post-Incident Review (PIR) to understand exactly what happened and why our existing controls did not catch it before it reached customers.
+
+The PIR should capture:
+
+what happened
+customer and business impact
+the timeline of the incident
+what deployment or change introduced the issue
+the root cause
+contributing factors
+what detected the issue
+what went well and what did not
+what actions are required to prevent recurrence
+
+The important part is that the PIR should result in tracked corrective actions with owners and priorities, rather than simply documenting what happened.
+
+For example, if the root cause was that a new application version passed the deployment pipeline but failed the ALB health check, the corrective actions could include:
+
+adding a deployment-time runtime health check
+improving application smoke tests
+validating the ALB health endpoint before production promotion
+configuring ECS deployment circuit-breaker rollback
+adding appropriate CloudWatch alerting
+improving deployment observability
+adding a test specifically covering the failure that caused the incident
+
+The deployment process should therefore validate the running application, not just whether the deployment commands completed successfully.
+
+The overall promotion process should be:
+
+Feature branch
+      ↓
+Pull request
+      ↓
+CI validation
+      ↓
+Review
+      ↓
+Merge
+      ↓
+Build immutable image
+      ↓
+Push to ECR
+      ↓
+Deploy to development
+      ↓
+Runtime health check
+      ↓
+Promote to staging
+      ↓
+Runtime health check
+      ↓
+Authorized production promotion
+      ↓
+Production health check
+
+If an incident still occurs, the response should then follow the incident-management lifecycle:
+
+Detect
+  ↓
+Investigate
+  ↓
+Mitigate / Recover
+  ↓
+Restore service
+  ↓
+Post-Incident Review
+  ↓
+Root cause analysis
+  ↓
+Corrective actions
+  ↓
+Track and verify remediation
+
+The goal is not simply to fix the individual incident. The goal is to identify why the existing controls allowed it to reach customers and then improve the engineering process so that the same class of failure is less likely to happen again.
+
+---
+
+# Engineering Judgement
+
+## Why did I choose this AWS architecture?
+
+I chose ECS Fargate because I wanted the simplest architecture that still gives me the security, reliability, and scalability required for the application.
+
+I could have used EKS, but for a relatively straightforward containerized application, Kubernetes introduces additional operational overhead and cost that I don't think is justified by this workload.
+
+ECS Fargate gives me managed container orchestration without having to manage the underlying EC2 instances, while still integrating cleanly with the ALB, IAM, CloudWatch, and the rest of the AWS architecture.
+
+So the decision was basically a balance between **cost, operational simplicity, security, and what the application actually needs**.
+
+Another possible architecture would be CloudFront with a VPC Origin in front of an internal ALB, with the ECS tasks remaining private.
+
+That would give me additional edge capabilities and further isolate the ALB from direct Internet access, but it also introduces another layer of infrastructure.
+
+For this particular use case, I felt that an internet-facing ALB with private ECS tasks was the simpler architecture that still satisfies the requirement that the application workload itself is not directly exposed to the Internet.
+
+## Why did I choose VPC endpoints?
+
+The application only needs private access to a small number of AWS services.
+
+In this architecture, the ECS tasks need access to ECR, CloudWatch Logs, and S3.
+
+Rather than giving the private subnets a general Internet egress path through a NAT Gateway, I can use VPC endpoints for the specific AWS services that the workload needs.
+
+That gives me a much more restricted network path.
+
+The S3 Gateway Endpoint also doesn't have the same hourly endpoint charge as interface endpoints, while the interface endpoints do have hourly and data-processing costs.
+
+So I would not say that VPC endpoints are universally cheaper than NAT Gateway.
+
+The reason I chose them here is that the workload has a small and clearly defined set of AWS dependencies, so it makes sense to give the workload private access to exactly those services rather than providing general outbound Internet access.
+
+---
+
+# Reliability and Rollback
+
+If a new deployment starts and fails its health checks, the desired behavior is that the new deployment should not become the healthy production version.
+
+The ALB health checks are responsible for determining whether the new targets are actually healthy.
+
+With ECS deployment circuit-breaker rollback configured, the deployment can be considered failed if the new version cannot reach a healthy state, and ECS can roll back to the previous deployment.
+
+The general behavior would therefore be:
+
+```text
+Previous healthy version
+          ↓
+Deploy new version
+          ↓
+New ECS tasks start
+          ↓
+ALB health checks
+          ↓
+     Healthy?
+      /      \
+    Yes       No
+     |         |
+Continue     Deployment
+             fails
+                ↓
+          Roll back to
+          previous version
+```
+
+For a manual rollback, I would use the previous explicitly versioned and pinned application image.
+
+For example, if production is currently running:
+
+```text
+v1.4.0
+```
+
+and I determine that:
+
+```text
+v1.3.2
+```
+
+was the last known-good version, I would explicitly redeploy `v1.3.2`.
+
+I prefer this approach because the deployment configuration should always tell me exactly which version I intend to run.
+
+I do not want Terraform to simply select whatever happens to be the newest image in ECR because that makes the actual deployed version less deterministic and makes rollback more difficult.
+
+The Terraform configuration should represent the desired state, and the application version should be an explicit input to that state.
+
+
+## Production Readiness
+
+Before considering this environment production-ready for a fintech platform, there are three main areas I would improve: **scalability, availability and disaster recovery, and security hardening**.
+
+### 1. Application Auto Scaling
+
+The first improvement I would make is introducing ECS Service Auto Scaling.
+
+The current architecture is intentionally kept simple, and the service is currently configured around a fixed task count. For a production fintech workload, I would not want capacity to be fixed like that.
+
+The service should be able to automatically scale out when demand increases and scale back in when demand decreases.
+
+I would configure scaling based on metrics such as:
+
+* CPU utilization
+* Memory utilization
+* Request count per target
+* Potentially application-specific metrics if the workload requires them
+
+I would also define sensible minimum and maximum task counts.
+
+This would allow the application to handle traffic spikes without requiring manual intervention, while still allowing the environment to scale back down when demand decreases.
+
+I would combine this with the existing ALB health checks and ECS deployment health checks so that scaling does not simply add more unhealthy tasks when there is an application problem.
+
+### 2. Multi-Region Availability and Disaster Recovery
+
+The second major improvement would be adding a proper disaster recovery strategy.
+
+The current architecture is deployed within a single AWS region and uses multiple Availability Zones. That protects the workload against an individual Availability Zone failure, but it does not protect against a full regional failure.
+
+For a fintech platform, I would want to evaluate a multi-region architecture with clearly defined recovery objectives.
+
+For example, I could have a secondary deployment of the same application architecture in another AWS region and use Route 53 health checks and DNS failover to direct traffic to the healthy region if the primary region becomes unavailable.
+
+CloudFront could also be introduced as a global entry point, particularly if I decide to move toward the CloudFront VPC Origin architecture discussed earlier.
+
+The important part is that the secondary region should be capable of actually serving the application. This means considering:
+
+* ECS infrastructure
+* ALB infrastructure
+* ECR image availability
+* Terraform infrastructure
+* required configuration and secrets
+* DNS and routing
+* monitoring and alerting
+
+I would also regularly test the failover process rather than simply assuming that having infrastructure in another region means the disaster recovery strategy works.
+
+The goal is to move from:
+
+> "The application is highly available within one region"
+
+to:
+
+> "The application has a defined and tested recovery path if the entire region becomes unavailable."
+
+### 3. Security Hardening and Threat Protection
+
+The third improvement would be additional security hardening.
+
+The current architecture already has several security controls:
+
+* ECS tasks are in private subnets
+* the ALB is the public entry point
+* security groups restrict traffic between the ALB and ECS
+* IAM follows least privilege
+* GitHub uses OIDC rather than long-lived AWS credentials
+* HTTPS is used for external traffic
+* AWS-service connectivity uses VPC endpoints rather than giving the workload unrestricted Internet access
+* CloudWatch provides monitoring and logging
+
+However, for a fintech platform, I would add additional layers of protection around the public-facing application.
+
+The first thing I would consider is **AWS WAF** in front of the application entry point.
+
+This would allow me to introduce controls such as:
+
+* rate limiting
+* IP-based restrictions
+* protection against common web attacks
+* malicious request filtering
+* bot-related controls
+
+I would also introduce **Amazon GuardDuty** for threat detection and strengthen centralized security monitoring so that suspicious AWS activity or potentially compromised resources can be detected and investigated.
+
+I would also review the existing IAM policies, security groups, logging, encryption, container security scanning, and CloudTrail configuration to make sure there are no unnecessary permissions or exposed resources.
+
+The important point is that putting ECS in private subnets is only one layer of security.
+
+For a fintech platform, I would assume that the public-facing application will continuously be targeted by automated scanning, bots, and malicious requests, so I would add additional preventive and detective controls around the existing architecture.
+
+### Summary
+
+The three improvements I would prioritize are:
+
+1. **Scalability** — introduce ECS auto scaling and proper capacity management so the application can respond to changes in demand.
+2. **Availability and disaster recovery** — introduce a tested multi-region strategy with DNS/traffic failover so the platform can recover from a regional failure.
+3. **Security hardening** — add WAF, GuardDuty, and stronger threat detection and protection around the existing networking, IAM, logging, and monitoring controls.
+
+These improvements build directly on the architecture I have already designed rather than introducing unnecessary components. They address the three areas I would consider most important before taking this architecture into a higher-criticality production environment: **can it scale, can it recover from a major failure, and can it withstand and detect attacks?**
