@@ -527,5 +527,3 @@ The three improvements I would prioritize are:
 1. **Scalability** — introduce ECS auto scaling and proper capacity management so the application can respond to changes in demand.
 2. **Availability and disaster recovery** — introduce a tested multi-region strategy with DNS/traffic failover so the platform can recover from a regional failure.
 3. **Security hardening** — add WAF, GuardDuty, and stronger threat detection and protection around the existing networking, IAM, logging, and monitoring controls.
-
-These improvements build directly on the architecture I have already designed rather than introducing unnecessary components. They address the three areas I would consider most important before taking this architecture into a higher-criticality production environment: **can it scale, can it recover from a major failure, and can it withstand and detect attacks?**
