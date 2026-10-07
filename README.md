@@ -1,5 +1,7 @@
 # aws-deploy
 
+> **Repository navigation:** The [`infra/`](./infra/) directory contains the Terraform configuration and detailed infrastructure implementation. The [`images/`](./images/) directory contains screenshots and visual references for the infrastructure and deployment setup.
+
 ## Application service
 
 The FastAPI service in `app/` provides:
