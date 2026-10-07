@@ -105,3 +105,38 @@ resource "aws_cloudwatch_log_delivery_destination" "logs" {
     destination_resource_arn = aws_cloudwatch_log_group.lb_log_group.arn
   }
 }
+
+resource "aws_cloudwatch_log_resource_policy" "alb_logs" {
+  resource_arn = aws_cloudwatch_log_group.lb_log_group.arn
+  policy_document = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "delivery.logs.amazonaws.com"
+      }
+      Action = [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ]
+      Resource = "${aws_cloudwatch_log_group.lb_log_group.arn}:*"
+      Condition = {
+        StringEquals = {
+          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+        }
+        ArnLike = {
+          "aws:SourceArn" = "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:delivery-source:*"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_cloudwatch_log_delivery" "logs" {
+  for_each = aws_cloudwatch_log_delivery_destination.logs
+
+  delivery_source_name     = local.log_delivery_sources[each.key]
+  delivery_destination_arn = each.value.arn
+
+  depends_on = [aws_cloudwatch_log_resource_policy.alb_logs]
+}

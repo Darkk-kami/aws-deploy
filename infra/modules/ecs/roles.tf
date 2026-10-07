@@ -20,7 +20,7 @@ resource "aws_iam_role_policy" "app_service_execution_role_policy" {
       {
         Effect   = "Allow"
         Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:${local.name_prefix}-ecs-service:*"
+        Resource = "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/ecs/${local.name_prefix}-ecs-service:*"
       },
       {
         Effect   = "Allow"

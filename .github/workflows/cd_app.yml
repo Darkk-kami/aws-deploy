@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "app/**"
+      - "!app/README.md"
 
 permissions:
   contents: read

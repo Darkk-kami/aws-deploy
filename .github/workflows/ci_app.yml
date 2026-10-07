@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "app/**"
+      - "!app/README.md"
     branches:
       - main
 
