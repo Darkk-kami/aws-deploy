@@ -11,14 +11,12 @@ plugins:
           release: patch
         - type: refactor
           release: patch
+        - type: chore
+          release: patch
         - type: perf
           release: patch
   - - "@semantic-release/release-notes-generator"
     - preset: conventionalcommits
-  - - "@semantic-release/changelog"
-    - changelogFile: "docs/CHANGELOG.md"
-  - - "@semantic-release/git"
-    - assets:
-        - docs/CHANGELOG.md
-      message: "chore(release): ${nextRelease.gitTag}"
+  - - "@semantic-release/exec"
+    - verifyReleaseCmd: "echo ${nextRelease.version} > .next-version"
   - "@semantic-release/github"
