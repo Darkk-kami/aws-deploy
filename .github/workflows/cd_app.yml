@@ -81,6 +81,7 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: write
+      pull-request: write
       id-token: write
     steps:
       - name: Check out
