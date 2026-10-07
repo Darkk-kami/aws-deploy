@@ -1,0 +1,67 @@
+name: Build image
+description: Build a single-platform image with the APP_VERSION and GIT_COMMIT build args and load it into the local Docker daemon so it can be tested, scanned and pushed.
+
+inputs:
+  image-tag:
+    description: Local tag to give the built image, e.g. aws-deploy:ci-amd64.
+    required: true
+  app-version:
+    description: Application version to embed in the image (APP_VERSION build arg).
+    required: true
+  git-commit:
+    description: Source commit to embed in the image (GIT_COMMIT build arg).
+    required: true
+  platform:
+    description: Target platform, e.g. linux/amd64 or linux/arm64.
+    required: false
+    default: linux/amd64
+  context:
+    description: Docker build context.
+    required: false
+    default: app
+  dockerfile:
+    description: Path to the Dockerfile.
+    required: false
+    default: app/Dockerfile
+  extra-build-args:
+    description: Additional build args, one KEY=VALUE per line.
+    required: false
+    default: ""
+  use-cache:
+    description: Use the GitHub Actions layer cache. Set to "false" for clean builds.
+    required: false
+    default: "true"
+  cache-scope:
+    description: Cache scope. Use a different value per architecture so the caches do not overwrite each other.
+    required: false
+    default: default
+  push-image:
+    description: To Push image
+    required: false
+    default: false
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 #v4.4.1
+      with:
+        driver: docker-container
+
+    - name: Build image
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc #v7.4.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
+        platforms: ${{ inputs.platform }}
+        load: true
+        push: ${{ inputs.push-image }}
+        provenance: false
+        tags: ${{ inputs.image-tag }}
+        no-cache: ${{ inputs.use-cache != 'true' }}
+        cache-from: ${{ inputs.use-cache == 'true' && format('type=gha,scope={0}', inputs.cache-scope) || '' }}
+        cache-to: ${{ inputs.use-cache == 'true' && format('type=gha,mode=max,scope={0}', inputs.cache-scope) || '' }}
+        build-args: |
+          APP_VERSION=${{ inputs.app-version }}
+          GIT_COMMIT=${{ inputs.git-commit }}
+          ${{ inputs.extra-build-args }}

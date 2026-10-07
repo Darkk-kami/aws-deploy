@@ -1,0 +1,156 @@
+name: CD - App
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "app/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-app-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.AWS_ECR_REPO }}
+
+jobs:
+  plan:
+    name: check next version
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release_needed: ${{ steps.resolve.outputs.release_needed }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next release version
+        id: dry-release
+        uses: ./.github/actions/release
+        with:
+          dry-run: "true"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version
+        id: resolve
+        shell: bash
+        env:
+          NEXT_VERSION: ${{ steps.dry-release.outputs.next_version }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${NEXT_VERSION}" ]]; then
+            version="${NEXT_VERSION}"
+            release_needed="true"
+            echo "Next release: v${version}"
+          else
+            # Nothing new to release. If this commit already carries a release tag, a
+            # previous run tagged it but did not finish, so the image still needs publishing.
+            tag="$(git tag --points-at HEAD --list 'v[0-9]*' | sort -V | tail -n1)"
+            if [[ -n "${tag}" ]]; then
+              version="${tag#v}"
+              release_needed="false"
+              echo "This commit is already released as ${tag}; only the image will be published."
+            else
+              version=""
+              release_needed="false"
+              echo "No releasable commits since the last release. Nothing to publish."
+            fi
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "release_needed=${release_needed}" >> "${GITHUB_OUTPUT}"
+
+  publish:
+    name: Build, test, release, and publish image
+    needs: plan
+    if: ${{ needs.plan.outputs.version != '' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Build image
+        uses: ./.github/actions/build
+        with:
+          image-tag: pr-${{ github.sha }}
+          app-version: ${{ needs.plan.outputs.version }}
+          git-commit: ${{ github.sha }}
+
+      - name: Smoke test image
+        uses: ./.github/actions/build_test
+        with:
+          image: pr-${{ github.sha }}
+
+      - name: Create semantic release
+        if: ${{ needs.plan.outputs.release_needed == 'true' }}
+        uses: ./.github/actions/release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Tag and push the image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          GIT_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          push_tag() {
+            local tag="$1"
+            local image_uri="${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}"
+
+            if aws ecr describe-images \
+              --repository-name "${ECR_REPOSITORY}" \
+              --image-ids "imageTag=${tag}" \
+              >/dev/null 2>ecr-describe-error.txt; then
+              echo "ECR tag ${tag} already exists."
+            else
+              if ! grep -q 'ImageNotFoundException' ecr-describe-error.txt; then
+                cat ecr-describe-error.txt >&2
+                echo "::error::Could not verify whether ECR tag ${tag} exists."
+                exit 1
+              fi
+
+              docker tag "pr-${GIT_COMMIT}" "${image_uri}"
+              docker push "${image_uri}"
+            fi
+          }
+
+          push_tag "${VERSION}"
+          push_tag "sha-${GIT_COMMIT}"
+
+          {
+            echo "### Published"
+            echo "- Release: \`v${VERSION}\`"
+            echo "- Image: \`${ECR_REGISTRY}/${ECR_REPOSITORY}:${VERSION}\`"
+            echo "- Commit tag: \`sha-${GIT_COMMIT}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

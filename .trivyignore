@@ -1,0 +1,4 @@
+# The application ALB is intentionally internet-facing to serve external traffic.
+AWS-0053
+# ALB access-log buckets require SSE-S3; ALB does not support SSE-KMS here.
+AWS-0132

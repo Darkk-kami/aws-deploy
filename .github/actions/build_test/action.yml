@@ -1,0 +1,62 @@
+name: Smoke test image
+description: Run an image locally and verify its health endpoint returns HTTP 200.
+
+inputs:
+  image:
+    description: Image to test, e.g. aws-deploy:ci-amd64.
+    required: true
+  port:
+    description: Port the app listens on inside the container.
+    required: false
+    default: "8000"
+  health-path:
+    description: Path of the health endpoint.
+    required: false
+    default: /health
+  timeout-seconds:
+    description: How long to wait for HTTP 200 before failing.
+    required: false
+    default: "30"
+
+runs:
+  using: composite
+  steps:
+    - name: Run container and check health
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PORT: ${{ inputs.port }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        TIMEOUT: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        container_name="smoke-test-$$"
+        trap 'docker rm --force "${container_name}" >/dev/null 2>&1 || true' EXIT
+
+        args=(--detach --name "${container_name}" --publish "127.0.0.1:${PORT}:${PORT}" --env "PORT=${PORT}")
+          args+=(
+            --read-only
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m
+            --cap-drop ALL
+            --security-opt no-new-privileges
+          )
+
+        docker run "${args[@]}" "${IMAGE}"
+
+        for attempt in $(seq 1 "${TIMEOUT}"); do
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            "http://127.0.0.1:${PORT}${HEALTH_PATH}" || true)"
+          if [ "${status}" = "200" ]; then
+            echo "Health endpoint returned HTTP 200 after ${attempt}s."
+            exit 0
+          fi
+          # Stop waiting if the container has already crashed (e.g. a write to the read-only filesystem).
+          if [ "$(docker inspect --format '{{.State.Running}}' "${container_name}")" != "true" ]; then
+            break
+          fi
+          sleep 1
+        done
+
+        docker logs "${container_name}" || true
+        echo "::error::Health endpoint ${HEALTH_PATH} did not return HTTP 200."
+        exit 1

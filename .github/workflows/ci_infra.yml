@@ -1,0 +1,84 @@
+name: CI - Infrastructure
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ci-infra-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-scan:
+    name: Terraform format, validation, and security
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.15.0"
+          terraform_wrapper: false
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -recursive infra
+
+      - name: Initialize without configuring the remote backend
+        run: terraform -chdir=infra/config-dev init -backend=false -input=false
+
+      - name: Validate Terraform configuration
+        run: terraform -chdir=infra/config-dev validate -no-color
+
+      - name: Scan infrastructure configuration with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra
+          trivyignores: .trivyignore
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+  plan:
+    name: Terraform plan
+    needs: validate-and-scan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.15.0"
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_INFRA_ROLE }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Initialize Terraform backend
+        run: terraform -chdir=infra/config-dev init -input=false
+
+      - name: Create Terraform plan
+        run: |
+          terraform -chdir=infra/config-dev plan \
+            -input=false \
+            -no-color \
+            -lock-timeout=5m \
+            -out=tfplan \
+            -var="domain_name=${{ secrets.DOMAIN_NAME }}"
