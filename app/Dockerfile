@@ -7,7 +7,6 @@ FROM ${PYTHON_IMAGE} AS builder
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_COMPILE=1
 
-    
 WORKDIR /build
 
 COPY requirements.txt .

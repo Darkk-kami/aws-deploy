@@ -17,6 +17,4 @@ plugins:
           release: patch
   - - "@semantic-release/release-notes-generator"
     - preset: conventionalcommits
-  - - "@semantic-release/exec"
-    - verifyReleaseCmd: "echo ${nextRelease.version} > .next-version"
   - "@semantic-release/github"
