@@ -1,0 +1,139 @@
+name: CI - App
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-app-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    name: Python lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses:  actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install Ruff
+        run: python -m pip install --disable-pip-version-check ruff
+
+      - name: Lint application
+        run: ruff check app/src
+
+  build-test:
+    name: Build and test application image
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build image
+        uses: ./.github/actions/build
+        with:
+          image-tag: aws-deploy:ci
+          app-version: pr-${{ github.sha }}
+          git-commit: pr-${{ github.sha }}
+
+      - name: Smoke test image
+        uses: ./.github/actions/build_test
+        with:
+          image: aws-deploy:ci
+
+  security:
+    name: Application security scan
+    needs: build-test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install pip-audit
+        run: python -m pip install --disable-pip-version-check pip-audit
+
+      - name: Audit Python dependencies
+        run: pip-audit --strict -r app/requirements.txt
+
+      - name: Scan source and Dockerfile with Trivy
+        id: trivy-scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DISABLE_VEX_NOTICE: "true"
+        with:
+          scan-type: fs
+          scan-ref: app
+          format: table
+          output: trivy-report.md
+          scanners: secret,misconfig
+          trivyignores: .trivyignore
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Upload Trivy Report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: trivy-report
+          path: trivy-report.md
+
+  report:
+    name: Report results on pull request
+    needs:
+      - security
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download Trivy report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c #v8.0.1
+        with:
+          name: trivy-report
+          path: .
+
+      - name: Create or update CI results comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 #v9.0.0
+        env:
+          SECURITY_RESULT: ${{ needs.security.result }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('trivy-report.md', 'utf8').trim();
+
+            const commentBody = planOutput
+              ? `**Trivy Report:**\n\`\`\`\n${planOutput}\n\`\`\``
+              : `**Trivy Report:** ✅ No vulnerabilities found.`;
+
+            github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: commentBody
+            });
+            

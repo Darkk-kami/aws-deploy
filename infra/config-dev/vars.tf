@@ -1,0 +1,13 @@
+variable "vpc_cidr" {}
+variable "public_subnet_cidrs" {}
+variable "app_private_subnet_cidrs" {}
+variable "repository_name" {}
+variable "domain_name" {}
+variable "app_service_image_tag" {}
+variable "app_service_port" {}
+variable "app_service_env_vars" {}
+variable "app_service_container_name" {}
+variable "lb_enable_deletion_protection" {}
+variable "ecr_force_destroy" {}
+variable "log_retention_days" {}
+variable "tags" {}
